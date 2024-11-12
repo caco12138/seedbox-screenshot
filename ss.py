@@ -5,10 +5,10 @@ import subprocess
 import platform
 import random
 import concurrent.futures
-import zipfile
 import urllib.request
 import tarfile
 import warnings
+import requests
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 
@@ -127,9 +127,13 @@ def get_video_duration(video_file):
         handle_error("无法获取视频时长", e)
 
 def generate_random_timestamps(duration, num_screenshots):
-    """ 生成随机截图时间戳。 """
+    """生成随机截图时间戳，排除开头的5分钟和结尾的15分钟。"""
+    start_time = 300  # 开头5分钟排除
+    end_time = max(start_time, duration - 900)  # 结尾15分钟排除，确保范围合法
+
+    # 生成随机时间戳
     return [f"{int(rand_time // 3600):02}:{int((rand_time % 3600) // 60):02}:{int(rand_time % 60):02}.{int((rand_time % 1) * 1000):03}"
-            for rand_time in [random.uniform(0, duration) for _ in range(num_screenshots)]]
+            for rand_time in [random.uniform(start_time, end_time) for _ in range(num_screenshots)]]
 
 def clear_directory(directory):
     """ 清空并创建目录。 """
@@ -172,14 +176,54 @@ def compress_image(output_file, quality):
     else:
         print(f"\033[31m压缩失败: {result.stderr.decode().strip()}\033[0m")
 
-def zip_directory(directory, zip_filename):
-    """ 将目录打包为 zip 文件。 """
-    if os.path.exists(zip_filename):
-        os.remove(zip_filename)
-    with zipfile.ZipFile(zip_filename, 'w', zipfile.ZIP_DEFLATED) as zipf:
-        for root, _, files in os.walk(directory):
-            for file in files:
-                zipf.write(os.path.join(root, file), arcname=file)
+def process_images_and_upload(output_dir):
+    """将截图上传到 Pixhost，并打印出所有图片的直接链接和 BBCode"""
+    url = "https://api.pixhost.to/images"
+    headers = {}
+    image_urls = []
+    bbcode_list = []
+
+    for file_name in os.listdir(output_dir):
+        file_path = os.path.join(output_dir, file_name)
+        if os.path.isfile(file_path):
+            with open(file_path, 'rb') as image_file:
+                files = {'img': (file_name, image_file)}
+                data = {'content_type': '0', 'max_th_size': '420'}
+                try:
+                    response = requests.post(url, data=data, files=files, headers=headers)
+                    if response.status_code == 200:
+                        response_data = response.json()
+                        if 'show_url' in response_data:
+                            show_url = response_data['show_url']
+                            # 使用正则表达式提取服务器号
+                            import re
+                            server_match = re.search(r"https://(?:img)?(\d+)\.pixhost\.to", show_url)
+                            server_number = server_match.group(1) if server_match else "100"  # 默认为 100
+
+                            # 构造正确的图片直接链接
+                            parts = show_url.split("/")
+                            direct_image_url = f"https://img{server_number}.pixhost.to/images/{parts[4]}/{parts[5]}"
+                            bbcode = f"[img]{direct_image_url}[/img]"
+                            image_urls.append(direct_image_url)
+                            bbcode_list.append(bbcode)
+                        else:
+                            print(f"\033[31m图片 {file_name} 上传失败，未返回 show_url。\033[0m")
+                    else:
+                        print(f"\033[31m图片 {file_name} 上传失败，HTTP状态码: {response.status_code}\033[0m")
+                except Exception as e:
+                    print(f"\033[31m上传图片 {file_name} 时出错: {e}\033[0m")
+
+    # 统一打印所有图片的直接链接
+    if image_urls:
+        print("\n\033[1;32m直接链接\033[0m:")
+        for url in image_urls:
+            print(url)
+
+    # 统一打印所有图片的 BBCode
+    if bbcode_list:
+        print("\n\033[1;32mBBCode\033[0m:")
+        for bbcode in bbcode_list:
+            print(bbcode)
 
 def process_compression(output_dir, num_screenshots, quality, max_workers=None):
     """ 批量压缩截图，支持多线程。 """
@@ -223,17 +267,14 @@ def main():
         sys.exit(1)
 
     if sys.argv[1] == 'oxipng':
-        # 只在执行 python3 script.py oxipng 时安装 oxipng
         print("开始安装 oxipng...")
         install_oxipng()
         sys.exit(0)
     elif sys.argv[1] == 'unoxipng':
-        # 只在执行 python3 script.py unoxipng 时卸载 oxipng
         print("开始卸载 oxipng...")
         uninstall_oxipng()
         sys.exit(0)
 
-    # 正常的截图和压缩流程
     if len(sys.argv) < 3 or (sys.argv[2] == '-t' and len(sys.argv) < 4):
         print("\033[31m错误: 缺少截图数量参数。用法: python3 script.py 视频文件 截图数量 (压缩质量) (-t)\033[0m")
         sys.exit(1)
@@ -270,7 +311,6 @@ def main():
         print("\033[33m提示:\033[0m 如需压缩请使用'python3 script.py oxipng'安装oxipng(仅amd)")
 
     output_dir = "screenshots"
-    zip_file = "screenshots.zip"
     clear_directory(output_dir)
 
     # 生成截图
@@ -301,9 +341,8 @@ def main():
         if quality:
             process_compression(output_dir, num_screenshots, quality, max_workers)
 
-    # 打包截图
-    zip_directory(output_dir, zip_file)
-    print(f"{num_screenshots} 张截图已保存到 {output_dir} 并压缩为 {zip_file}。")
+    # 上传截图到 Pixhost
+    process_images_and_upload(output_dir)
 
 if __name__ == "__main__":
     main()
